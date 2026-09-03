@@ -1,0 +1,204 @@
+name: decompile
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: 'A .cppia to decompile instead of the test module, or a directory to search'
+        required: false
+        default: ''
+      all:
+        description: 'Keep the generated types that are skipped by default'
+        type: boolean
+        default: false
+
+jobs:
+  module:
+    if: ${{ inputs.path == '' }}
+    runs-on: ubuntu-latest
+    container: haxe:4.3.6
+
+    steps:
+      - name: Install git so checkout can use it
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git
+
+      - uses: actions/checkout@v4
+
+      - name: Install hxcpp
+        run: |
+          set -eu
+          haxe --version
+          mkdir -p "$HOME/haxelib"
+          haxelib setup "$HOME/haxelib"
+          haxelib install hxcpp --quiet --always
+
+      - name: Build the test module
+        working-directory: tests
+        run: |
+          set -eu
+          haxe build.hxml
+          test "$(head -c 5 TestModule.cppia)" = "CPPIA"
+          ls -l TestModule.cppia
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-module
+          path: tests/TestModule.cppia
+          if-no-files-found: error
+          retention-days: 14
+
+  decompile:
+    needs: [module]
+    if: ${{ always() && !cancelled() && (needs.module.result == 'success' || needs.module.result == 'skipped') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Build the decompiler
+        run: dotnet build CPPIADecompiler.csproj --configuration Release
+
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.path == '' }}
+        with:
+          name: test-module
+          path: tests
+
+      - name: Decompile
+        run: |
+          set -o pipefail
+          target='${{ inputs.path }}'
+          if [ -z "$target" ]; then target='tests/TestModule.cppia'; fi
+
+          extra=''
+          if [ '${{ inputs.all }}' = 'true' ]; then extra='--all'; fi
+
+          if [ -f "$target" ]; then
+            files="$target"
+          elif [ -d "$target" ]; then
+            files=$(find "$target" -type f -name '*.cppia')
+          else
+            echo "no such file or directory: $target"
+            exit 1
+          fi
+
+          if [ -z "$files" ]; then
+            echo "no .cppia files under $target"
+            exit 1
+          fi
+
+          mkdir -p decompiled
+          status=0
+          while IFS= read -r file; do
+            name=$(basename "$file" .cppia)
+            echo "::group::$file"
+            dotnet run --project CPPIADecompiler.csproj --configuration Release --no-build -- \
+              "$file" -o "decompiled/$name" $extra 2>&1 | tee "decompiled/$name.log" || status=1
+            echo "::endgroup::"
+          done <<< "$files"
+          exit $status
+
+      - name: End of file checks
+        run: |
+          if grep -rq 'desynced' decompiled --include='*.log'; then
+            echo "the parser desynced, so an opcode is being read with the wrong arity"
+            grep -rn 'desynced' decompiled --include='*.log'
+            exit 1
+          fi
+          echo "every file was consumed to the end"
+
+      - name: Opcode checks
+        run: |
+          left=$(grep -rho '/\* [A-Za-z_]*' decompiled --include='*.hx' | sort | uniq -c | sort -rn || true)
+          if [ -n "$left" ]; then
+            echo "the writer left opcodes it does not handle:"
+            echo "$left"
+            exit 1
+          fi
+          echo "every opcode was lowered"
+
+      - name: Code Checks
+        if: ${{ inputs.path == '' }}
+        run: |
+          out=decompiled/TestModule
+          fail=0
+
+          # Fixed string, for anything without regex characters in it.
+          check() {
+            if grep -rqF -- "$2" "$out"; then echo "ok    $1"; else echo "MISS  $1  ($2)"; fail=1; fi
+          }
+
+          # Regex, so a pattern can use . in place of a backslash and avoid quoting trouble.
+          checkRe() {
+            if grep -rqE -- "$2" "$out"; then echo "ok    $1"; else echo "MISS  $1  ($2)"; fail=1; fi
+          }
+
+          check   'enum declaration'      'enum Shape'
+          check   'enum constructor args' 'Box(w:Float, h:Float);'
+          check   'enum construction'     'Shape.Box('
+          check   'enum singleton'        'Shape.Dot'
+          checkRe 'enum parameter read'   'Type.enumParameters'
+          check   'interface'             'interface Named'
+          check   'interface method'      'function size():Int;'
+          check   'inheritance'           'class TestCalls extends Base'
+          check   'interface implement'   'implements Sized'
+          check   'property accessors'    'counted(get, set)'
+          check   'read only property'    'readOnly(default, null)'
+          check   'isVar only on accessor' '@:isVar'
+          check   'dynamic function'      'dynamic function hook'
+          check   'constructor default'   'function new(label:String = "base")'
+          check   'optional argument'     '?b:String'
+          check   'static function'       'static function make('
+          check   'static var init'       'shared:String = "static init"'
+          check   'array literal'         '[1, 2, 3]'
+          check   'class reference'       'refs:Array<Dynamic> = [Base, TestProps]'
+          check   'super call'            'super.name()'
+          check   'super constructor'     'super(label)'
+          check   'closure'               'function(a:Int, b:Int)'
+          check   'closure default arg'   'function(a:Int = 5)'
+          check   'switch'                'switch ('
+          check   'multi label case'      'case 1, 2:'
+          check   'default case'          'default:'
+          check   'try'                   'try'
+          check   'catch'                 'catch ('
+          check   'throw'                 'throw "negative"'
+          check   'while loop'            'while ('
+          check   'do while'              'do'
+          check   'break'                 'break;'
+          check   'continue'              'continue;'
+          check   'ternary'               ' ? '
+          check   'object literal'        'alpha : '
+          check   'class downcast'        'cast('
+          check   'Std.int'               'Std.int('
+          check   'array index'           'this.items['
+          check   'compound assign'       '+='
+          check   'shift assign'          '<<='
+          check   'bitwise not'           '~'
+          check   'pre decrement'         '--'
+          checkRe 'string escapes'        'tab .t and newline .n'
+          checkRe 'trace position info'   'fileName : "'
+          checkRe 'hxcpp builtin call'    '__hxcpp_[a-z_]+\('
+
+          echo
+          if [ $fail -ne 0 ]; then
+            echo "some features did not survive the round trip"
+            exit 1
+          fi
+          echo "every covered feature survived"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: decompiled
+          path: decompiled
+          if-no-files-found: warn
+          retention-days: 14
