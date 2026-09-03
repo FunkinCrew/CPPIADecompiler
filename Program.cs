@@ -170,7 +170,7 @@ namespace CPPIADecompiler
 
         public static void PrintUsage()
         {
-            Console.Error.WriteLine("usage: CPPIADecompiler <file.cppia> [-o <dir>] [--all] [--dump-tables] [--ast]");
+            Console.Error.WriteLine("usage: CPPIADecompiler <file.cppia> [-o <dir>] [--all] [--dump-tables]");
             Console.Error.WriteLine("  --all keeps the generated types that are skipped by default");
             Console.Error.WriteLine("  with no -o the whole module is written to stdout");
         }

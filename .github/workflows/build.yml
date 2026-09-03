@@ -1,0 +1,53 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore CPPIADecompiler.csproj
+
+      - name: Build
+        run: dotnet build CPPIADecompiler.csproj --configuration Release --no-restore
+
+      - name: Publish
+        run: >
+          dotnet publish CPPIADecompiler.csproj
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:PublishTrimmed=true
+          -p:DebugType=none
+          --output publish/${{ matrix.rid }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CPPIADecompiler-${{ matrix.rid }}
+          path: publish/${{ matrix.rid }}
+          if-no-files-found: error
+          retention-days: 30
