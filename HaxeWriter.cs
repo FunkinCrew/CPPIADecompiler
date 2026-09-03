@@ -131,7 +131,10 @@ public sealed class HaxeWriter
         string name = module.Str(variable.NameId);
         bool property = variable.Read != Access.Normal || variable.Write != Access.Normal;
 
-        if (property && !variable.IsVirtual)
+        bool accessor = variable.Read is Access.Call or Access.CallNative
+            || variable.Write is Access.Call or Access.CallNative;
+
+        if (accessor && !variable.IsVirtual)
             text.Append("\t@:isVar\n");
 
         text.Append('\t');
